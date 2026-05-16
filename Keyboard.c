@@ -11,12 +11,8 @@
  */
 #include <avr/io.h>
 #include <avr/interrupt.h>
-#include <util/delay.h>
 
 #include "Keyboard.h"
-
-#define PS2_CLK_PIN  0
-#define PS2_DATA_PIN 1
 
 // static uint8_t break_code = 0;
 // static uint8_t current_key = 0;
@@ -35,8 +31,6 @@ typedef enum
 
 static ps2_state_t ps2_state = PS2_STATE_NORMAL;
 static volatile bool ps2_queue_overflow = false;
-static volatile bool ps2_led_pending = false;
-static volatile uint8_t ps2_led_state = 0;
 static bool report_changed = false;
 
 #define PS2_QUEUE_SIZE 16
@@ -203,113 +197,6 @@ static void process_ps2_byte(uint8_t byte)
 	ps2_state = PS2_STATE_NORMAL;
 }
 
-static bool ps2_wait_clock(uint8_t level)
-{
-	for (uint8_t i = 0; i < 255; i++)
-	{
-		if (!!(PIND & (1 << PS2_CLK_PIN)) == level)
-			return true;
-
-		_delay_us(1);
-	}
-
-	return false;
-}
-
-static bool ps2_send_byte(uint8_t data)
-{
-	uint8_t parity = 1;
-	bool    ok    = true;
-
-	cli();
-	EIMSK &= ~(1 << INT0);
-
-	DDRD |= (1 << PS2_DATA_PIN);
-	PORTD &= ~(1 << PS2_DATA_PIN);
-	_delay_us(300);
-
-	DDRD &= ~(1 << PS2_CLK_PIN);
-	if (!ps2_wait_clock(0))
-		ok = false;
-
-	if (ok)
-	{
-		DDRD |= (1 << PS2_DATA_PIN);
-		PORTD &= ~(1 << PS2_DATA_PIN);
-		if (!ps2_wait_clock(1) || !ps2_wait_clock(0))
-			ok = false;
-	}
-
-	for (uint8_t i = 0; ok && i < 8; i++)
-	{
-		if (data & (1 << i))
-		{
-			PORTD |= (1 << PS2_DATA_PIN);
-			parity++;
-		}
-		else
-		{
-			PORTD &= ~(1 << PS2_DATA_PIN);
-		}
-
-		if (!ps2_wait_clock(1) || !ps2_wait_clock(0))
-			ok = false;
-	}
-
-	if (ok)
-	{
-		if (parity & 1)
-			PORTD &= ~(1 << PS2_DATA_PIN);
-		else
-			PORTD |= (1 << PS2_DATA_PIN);
-
-		if (!ps2_wait_clock(1) || !ps2_wait_clock(0))
-			ok = false;
-	}
-
-	if (ok)
-	{
-		PORTD |= (1 << PS2_DATA_PIN);
-		if (!ps2_wait_clock(1) || !ps2_wait_clock(0))
-			ok = false;
-	}
-
-	if (ok)
-	{
-		DDRD &= ~(1 << PS2_DATA_PIN);
-		if (!ps2_wait_clock(1) || !ps2_wait_clock(0))
-			ok = false;
-	}
-
-	DDRD &= ~((1 << PS2_CLK_PIN) | (1 << PS2_DATA_PIN));
-	PORTD |= (1 << PS2_CLK_PIN) | (1 << PS2_DATA_PIN);
-	EIMSK |= (1 << INT0);
-	sei();
-
-	return ok;
-}
-
-static void ps2_set_keyboard_leds(uint8_t leds)
-{
-	if (ps2_send_byte(0xED))
-		ps2_send_byte(leds);
-}
-
-static void ps2_flush_pending_leds(void)
-{
-	uint8_t leds;
-
-	if (!ps2_led_pending)
-		return;
-
-	cli();
-	leds = ps2_led_state;
-	ps2_led_pending = false;
-	sei();
-
-	ps2_set_keyboard_leds(leds);
-}
-
 static void process_ps2_queue(void)
 {
 	uint8_t byte;
@@ -324,49 +211,38 @@ static void process_ps2_queue(void)
 
 	while (ps2_dequeue(&byte))
 		process_ps2_byte(byte);
-
-	ps2_flush_pending_leds();
 }
 
 static uint8_t ps2_arrow_to_hid(uint8_t code, bool extended)
 {
-	if (!extended)
-		return 0;
-
-	switch (code)
+	if (extended)
 	{
-	case 0x75:
-	case 0x48: return HID_KEYBOARD_SC_UP_ARROW;
-	case 0x72:
-	case 0x50: return HID_KEYBOARD_SC_DOWN_ARROW;
-	case 0x6B:
-	case 0x4B: return HID_KEYBOARD_SC_LEFT_ARROW;
-	case 0x74:
-	case 0x4D: return HID_KEYBOARD_SC_RIGHT_ARROW;
-	default:   return 0;
+		switch (code)
+		{
+		case 0x75:
+		case 0x48: return HID_KEYBOARD_SC_UP_ARROW;
+		case 0x72:
+		case 0x50: return HID_KEYBOARD_SC_DOWN_ARROW;
+		case 0x6B:
+		case 0x4B: return HID_KEYBOARD_SC_LEFT_ARROW;
+		case 0x74:
+		case 0x4D: return HID_KEYBOARD_SC_RIGHT_ARROW;
+		default:   break;
+		}
 	}
-}
-
-static uint8_t ps2_keypad_to_hid(uint8_t code)
-{
-	switch (code)
+	else
 	{
-	case 0x69: return HID_KEYBOARD_SC_KEYPAD_1_AND_END;
-	case 0x6B: return HID_KEYBOARD_SC_KEYPAD_4_AND_LEFT_ARROW;
-	case 0x72: return HID_KEYBOARD_SC_KEYPAD_2_AND_DOWN_ARROW;
-	case 0x73: return HID_KEYBOARD_SC_KEYPAD_5;
-	case 0x74: return HID_KEYBOARD_SC_KEYPAD_6_AND_RIGHT_ARROW;
-	case 0x75: return HID_KEYBOARD_SC_KEYPAD_8_AND_UP_ARROW;
-	case 0x7A: return HID_KEYBOARD_SC_KEYPAD_3_AND_PAGE_DOWN;
-	case 0x6C: return HID_KEYBOARD_SC_KEYPAD_7_AND_HOME;
-	case 0x7D: return HID_KEYBOARD_SC_KEYPAD_9_AND_PAGE_UP;
-	case 0x70: return HID_KEYBOARD_SC_KEYPAD_0_AND_INSERT;
-	case 0x71: return HID_KEYBOARD_SC_KEYPAD_DOT_AND_DELETE;
-	case 0x4A: return HID_KEYBOARD_SC_KEYPAD_SLASH;
-	case 0x7C: return HID_KEYBOARD_SC_KEYPAD_ASTERISK;
-	case 0x79: return HID_KEYBOARD_SC_KEYPAD_PLUS;
-	default:   return 0;
+		switch (code)
+		{
+		case 0x75: return HID_KEYBOARD_SC_UP_ARROW;
+		case 0x72: return HID_KEYBOARD_SC_DOWN_ARROW;
+		case 0x6B: return HID_KEYBOARD_SC_LEFT_ARROW;
+		case 0x74: return HID_KEYBOARD_SC_RIGHT_ARROW;
+		default:   break;
+		}
 	}
+
+	return 0;
 }
 
 // PS/2 → HID mapping
@@ -388,15 +264,9 @@ static uint8_t ps2_to_hid(uint8_t code, bool extended)
 		case 0x7D: return HID_KEYBOARD_SC_PAGE_UP;
 		case 0x7A: return HID_KEYBOARD_SC_PAGE_DOWN;
 		case 0x1F: return HID_KEYBOARD_SC_LEFT_GUI;
-		case 0x7E: return HID_KEYBOARD_SC_SCROLL_LOCK;
 		default:   return 0;
 		}
 	}
-
-	key = ps2_keypad_to_hid(code);
-
-	if (key)
-		return key;
 
 	switch (code)
 	{
@@ -476,10 +346,7 @@ static uint8_t ps2_to_hid(uint8_t code, bool extended)
 	case 0x78: return HID_KEYBOARD_SC_F11;
 	case 0x07: return HID_KEYBOARD_SC_F12;
 
-	case 0x7B: return HID_KEYBOARD_SC_KEYPAD_MINUS;
-
-	case 0x77: return HID_KEYBOARD_SC_NUM_LOCK;
-	case 0x58: return HID_KEYBOARD_SC_CAPS_LOCK;
+	case 0x7B: return HID_KEYBOARD_SC_PRINT_SCREEN;
 
 	default: return 0;
 	}
@@ -507,7 +374,6 @@ int main(void)
 		process_ps2_queue();
 		HID_Device_USBTask(&Keyboard_HID_Interface);
 		USB_USBTask();
-		ps2_flush_pending_leds();
 	}
 }
 
@@ -723,31 +589,16 @@ void CALLBACK_HID_Device_ProcessHIDReport(USB_ClassInfo_HID_Device_t* const HIDI
 {
 	uint8_t  LEDMask   = LEDS_NO_LEDS;
 	uint8_t* LEDReport = (uint8_t*)ReportData;
-	uint8_t  ps2Leds   = 0;
 
 	if (*LEDReport & HID_KEYBOARD_LED_NUMLOCK)
-	{
-		LEDMask |= LEDS_LED1;
-		ps2Leds |= 0x02;
-	}
+	  LEDMask |= LEDS_LED1;
 
 	if (*LEDReport & HID_KEYBOARD_LED_CAPSLOCK)
-	{
-		LEDMask |= LEDS_LED3;
-		ps2Leds |= 0x04;
-	}
+	  LEDMask |= LEDS_LED3;
 
 	if (*LEDReport & HID_KEYBOARD_LED_SCROLLLOCK)
-	{
-		LEDMask |= LEDS_LED4;
-		ps2Leds |= 0x01;
-	}
+	  LEDMask |= LEDS_LED4;
 
 	LEDs_SetAllLEDs(LEDMask);
-
-	cli();
-	ps2_led_state = ps2Leds;
-	ps2_led_pending = true;
-	sei();
 }
 

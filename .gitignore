@@ -3,3 +3,10 @@ lufa
 obj
 .proxyai
 
+Keyboard.bin
+Keyboard.eep
+Keyboard.elf
+Keyboard.hex
+Keyboard.lss
+Keyboard.map
+Keyboard.sym
