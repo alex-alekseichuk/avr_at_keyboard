@@ -11,12 +11,7 @@
  */
 #include <avr/io.h>
 #include <avr/interrupt.h>
-
 #include "Keyboard.h"
-
-// static uint8_t break_code = 0;
-// static uint8_t current_key = 0;
-// static uint8_t modifiers = 0;
 
 static uint8_t modifiers = 0;
 static uint8_t keys[6] = {0};
@@ -32,6 +27,19 @@ typedef enum
 static ps2_state_t ps2_state = PS2_STATE_NORMAL;
 static volatile bool ps2_queue_overflow = false;
 static bool report_changed = false;
+static bool modifiers_went_down_in_batch = false;
+static bool modifier_only_report = false;
+
+#define DEFERRED_KEY_MAX 4
+
+typedef struct
+{
+	uint8_t hid;
+	bool    pressed;
+} deferred_key_t;
+
+static deferred_key_t deferred_keys[DEFERRED_KEY_MAX];
+static uint8_t        deferred_count = 0;
 
 #define PS2_QUEUE_SIZE 16
 #define PS2_QUEUE_MASK (PS2_QUEUE_SIZE - 1)
@@ -154,6 +162,7 @@ static void remove_key(uint8_t key)
 
 static uint8_t ps2_to_hid(uint8_t code, bool extended);
 static void handle_modifier(uint8_t code, uint8_t pressed, bool extended);
+static void flush_deferred_keys(void);
 
 static void process_ps2_byte(uint8_t byte)
 {
@@ -179,22 +188,50 @@ static void process_ps2_byte(uint8_t byte)
 	                      (ps2_state == PS2_STATE_EXTENDED_BREAK);
 	const bool pressed = (ps2_state == PS2_STATE_NORMAL) ||
 	                     (ps2_state == PS2_STATE_EXTENDED);
+	const uint8_t prev_modifiers = modifiers;
 
-	handle_modifier(byte, pressed, extended);
+	handle_modifier(byte, pressed, extended); // update modifiers
+
+	if (pressed && prev_modifiers == 0 && modifiers != 0)
+		modifiers_went_down_in_batch = true;
 
 	uint8_t key = ps2_to_hid(byte, extended);
 
 	if (key)
 	{
-		if (pressed)
-			add_key(key);
+		if (modifiers_went_down_in_batch && pressed && deferred_count < DEFERRED_KEY_MAX)
+		{
+			deferred_keys[deferred_count].hid = key;
+			deferred_keys[deferred_count].pressed = true;
+			deferred_count++;
+		}
 		else
-			remove_key(key);
+		{
+			if (pressed)
+				add_key(key);
+			else
+				remove_key(key);
+
+			report_changed = true;
+		}
+	}
+
+	ps2_state = PS2_STATE_NORMAL;
+}
+
+static void flush_deferred_keys(void)
+{
+	for (uint8_t i = 0; i < deferred_count; i++)
+	{
+		if (deferred_keys[i].pressed)
+			add_key(deferred_keys[i].hid);
+		else
+			remove_key(deferred_keys[i].hid);
 
 		report_changed = true;
 	}
 
-	ps2_state = PS2_STATE_NORMAL;
+	deferred_count = 0;
 }
 
 static void process_ps2_queue(void)
@@ -207,6 +244,8 @@ static void process_ps2_queue(void)
 		ps2_queue_overflow = false;
 		sei();
 		ps2_state = PS2_STATE_NORMAL;
+		deferred_count = 0;
+		modifiers_went_down_in_batch = false;
 	}
 
 	while (ps2_dequeue(&byte))
@@ -260,7 +299,9 @@ static uint8_t ps2_to_hid(uint8_t code, bool extended)
 		case 0x70: return HID_KEYBOARD_SC_INSERT;
 		case 0x71: return HID_KEYBOARD_SC_DELETE;
 		case 0x6C: return HID_KEYBOARD_SC_HOME;
+		case 0x47: return HID_KEYBOARD_SC_HOME;
 		case 0x69: return HID_KEYBOARD_SC_END;
+		case 0x4F: return HID_KEYBOARD_SC_END;
 		case 0x7D: return HID_KEYBOARD_SC_PAGE_UP;
 		case 0x7A: return HID_KEYBOARD_SC_PAGE_DOWN;
 		case 0x1F: return HID_KEYBOARD_SC_LEFT_GUI;
@@ -372,6 +413,17 @@ int main(void)
 	for (;;)
 	{
 		process_ps2_queue();
+
+		if (modifiers_went_down_in_batch)
+		{
+			modifiers_went_down_in_batch = false;
+			modifier_only_report = true;
+			report_changed = true;
+			HID_Device_USBTask(&Keyboard_HID_Interface);
+			modifier_only_report = false;
+		}
+
+		flush_deferred_keys();
 		HID_Device_USBTask(&Keyboard_HID_Interface);
 		USB_USBTask();
 	}
@@ -495,82 +547,20 @@ bool CALLBACK_HID_Device_CreateHIDReport(USB_ClassInfo_HID_Device_t* const HIDIn
 	USB_KeyboardReport_Data_t* report = ReportData;
 
 	report->Modifier = modifiers;
+	report->Reserved  = 0;
 
 	for (uint8_t i = 0; i < 6; i++)
 		report->KeyCode[i] = keys[i];
 
 	*ReportSize = sizeof(USB_KeyboardReport_Data_t);
 
-	if (report_changed)
+	if (modifier_only_report || report_changed)
 	{
 		report_changed = false;
 		return true;
 	}
 
 	return false;
-
-	// bool dataChanged = false;
-	//
-	// USB_KeyboardReport_Data_t* report = (USB_KeyboardReport_Data_t*)ReportData;
-	//
-	// if (ps2_ready)
-	// {
-	// 	ps2_ready = 0;
-	//
-	// 	if (ps2_byte == 0xF0)
-	// 	{
-	// 		break_code = 1;
-	// 	}
-	// 	else
-	// 	{
-	// 		uint8_t key = ps2_to_hid(ps2_byte);
-	//
-	// 		if (key)
-	// 		{
-	// 			if (break_code)
-	// 			{
-	// 				break_code = 0;
-	// 			}
-	// 			else
-	// 			{
-	// 				report->KeyCode[0] = key;
-	// 				dataChanged = true;
-	// 			}
-	// 		}
-	// 	}
-	// }
-	//
-	// *ReportSize = sizeof(USB_KeyboardReport_Data_t);
-	// return dataChanged;
-
-	// USB_KeyboardReport_Data_t* KeyboardReport = (USB_KeyboardReport_Data_t*)ReportData;
-	//
-	// uint8_t JoyStatus_LCL    = Joystick_GetStatus();
-	// uint8_t ButtonStatus_LCL = Buttons_GetStatus();
-	//
-	// uint8_t UsedKeyCodes = 0;
-	//
-	// if (JoyStatus_LCL & JOY_UP)
-	//   KeyboardReport->KeyCode[UsedKeyCodes++] = HID_KEYBOARD_SC_A;
-	// else if (JoyStatus_LCL & JOY_DOWN)
-	//   KeyboardReport->KeyCode[UsedKeyCodes++] = HID_KEYBOARD_SC_B;
-	//
-	// if (JoyStatus_LCL & JOY_LEFT)
-	//   KeyboardReport->KeyCode[UsedKeyCodes++] = HID_KEYBOARD_SC_C;
-	// else if (JoyStatus_LCL & JOY_RIGHT)
-	//   KeyboardReport->KeyCode[UsedKeyCodes++] = HID_KEYBOARD_SC_D;
-	//
-	// if (JoyStatus_LCL & JOY_PRESS)
-	//   KeyboardReport->KeyCode[UsedKeyCodes++] = HID_KEYBOARD_SC_E;
-	//
-	// if (ButtonStatus_LCL & BUTTONS_BUTTON1)
-	//   KeyboardReport->KeyCode[UsedKeyCodes++] = HID_KEYBOARD_SC_F;
-	//
-	// if (UsedKeyCodes)
-	//   KeyboardReport->Modifier = HID_KEYBOARD_MODIFIER_LEFTSHIFT;
-	//
-	// *ReportSize = sizeof(USB_KeyboardReport_Data_t);
-	// return false;
 }
 
 /** HID class driver callback function for the processing of HID reports from the host.
@@ -601,4 +591,3 @@ void CALLBACK_HID_Device_ProcessHIDReport(USB_ClassInfo_HID_Device_t* const HIDI
 
 	LEDs_SetAllLEDs(LEDMask);
 }
-
