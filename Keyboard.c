@@ -4,11 +4,6 @@
  *  the application and is responsible for the initial application hardware configuration.
  */
 
-/**
- * Подключаем PS/2 вход
- * CLOCK = PD0 (INT0) -- D3
- * DATA  = PD1        -- D2
- */
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include "Keyboard.h"
