@@ -7,11 +7,11 @@
 
 #define CLK_PORT PORTD
 #define CLK_DDR  DDRD
-#define CLK_PIN  PD2
+#define CLK_PIN  PD0
 
 #define DAT_PORT PORTD
 #define DAT_DDR  DDRD
-#define DAT_PIN  PD3
+#define DAT_PIN  PD1
 
 static inline void clk_low(void)
 {

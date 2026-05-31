@@ -123,12 +123,6 @@ static bool ps2_dequeue(uint8_t *byte)
 	return has_got;
 }
 
-uint8_t wait_for_byte(void) {
-	uint8_t b;
-	while (!ps2_dequeue(&b));
-	return b;
-}
-
 /** Buffer to hold the previously generated Keyboard HID report, for comparison purposes inside the HID class driver. */
 static uint8_t PrevKeyboardHIDReportBuffer[sizeof(USB_KeyboardReport_Data_t)];
 
@@ -388,15 +382,17 @@ static void process_ps2_queue(void)
 	}
 
 	while (ps2_dequeue(&byte)) {
-		may_send_next_byte = true;
-		process_ps2_byte(byte);
+		if (byte == 0xFA)
+			may_send_next_byte = true;
+		else
+			process_ps2_byte(byte);
 	}
 
 	if (may_send_next_byte && send_tail != send_head) {
 		uint8_t byte = send_queue[send_tail];
 		send_tail = (send_tail + 1) & SEND_QUEUE_MASK;
 		may_send_next_byte = false;
-		//ps2_send(byte);
+		ps2_send(byte);
 	}
 }
 
@@ -513,12 +509,13 @@ void CALLBACK_HID_Device_ProcessHIDReport(USB_ClassInfo_HID_Device_t* const HIDI
 	if (*LEDReport & HID_KEYBOARD_LED_SCROLLLOCK)
 		LEDMask |= 1;
 	if (*LEDReport & HID_KEYBOARD_LED_NUMLOCK)
-	  LEDMask |= 2;
+		LEDMask |= 2;
 	if (*LEDReport & HID_KEYBOARD_LED_CAPSLOCK)
-	  LEDMask |= 4;
+		LEDMask |= 4;
 
 	send(0xED);
 	send(LEDMask);
+	// send(0x07); // all leds on
 }
 
 /** Configures the board hardware and chip peripherals for the demo's functionality. */
