@@ -1,16 +1,3 @@
-#
-#             LUFA Library
-#     Copyright (C) Dean Camera, 2021.
-#
-#  dean [at] fourwalledcubicle [dot] com
-#           www.lufa-lib.org
-#
-# --------------------------------------
-#         LUFA Project Makefile.
-# --------------------------------------
-
-# Run "make help" for target help.
-
 MCU          = atmega32u4
 ARCH         = AVR8
 BOARD        = USBKEY
@@ -18,8 +5,8 @@ F_CPU        = 16000000
 F_USB        = $(F_CPU)
 OPTIMIZATION = s
 TARGET       = Keyboard
-SRC          = $(TARGET).c Descriptors.c $(LUFA_SRC_USB) $(LUFA_SRC_USBCLASS)
-#LUFA_PATH    = ../../../../LUFA
+SRC          = $(TARGET).c Descriptors.c ps2_send.c $(LUFA_SRC_USB) $(LUFA_SRC_USBCLASS)
+#SRC          = $(TARGET).c $(LUFA_SRC_USB) $(LUFA_SRC_USBCLASS)
 LUFA_PATH    = ./lufa/LUFA
 CC_FLAGS     = -DUSE_LUFA_CONFIG_HEADER -IConfig/
 LD_FLAGS     =
@@ -33,7 +20,7 @@ include $(DMBS_LUFA_PATH)/lufa-sources.mk
 include $(DMBS_LUFA_PATH)/lufa-gcc.mk
 
 # Include common DMBS build system modules
-DMBS_PATH      ?= $(LUFA_PATH)/Build/DMBS/DMBS
+DMBS_PATH ?= $(LUFA_PATH)/Build/DMBS/DMBS
 include $(DMBS_PATH)/core.mk
 include $(DMBS_PATH)/cppcheck.mk
 include $(DMBS_PATH)/doxygen.mk

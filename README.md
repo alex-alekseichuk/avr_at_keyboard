@@ -27,3 +27,8 @@ make
 # to enter the bootloader mode for 8 seconds
 make flash
 ```
+
+### TODO:
+- leds on keyboard
+- print screen
+- pause/break
