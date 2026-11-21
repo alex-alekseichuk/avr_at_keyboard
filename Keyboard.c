@@ -1,31 +1,20 @@
+#include <stdbool.h>
+
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include <avr/wdt.h>
+#include <avr/power.h>
+
+#include <LUFA/Drivers/Board/Joystick.h>
+#include <LUFA/Drivers/Board/LEDs.h>
+#include <LUFA/Drivers/Board/Buttons.h>
+#include <LUFA/Drivers/USB/USB.h>
+
+#include "Descriptors.h"
 #include "Keyboard.h"
-#include "ps2_send.h"
-
-void on1() { PORTB &= ~(1 << PB0); }
-void on2() { PORTD &= ~(1 << PD5); }
-void off1() { PORTB |= (1 << PB0); }
-void off2() { PORTD |= (1 << PD5); }
-void init_on_off() {
-	DDRB |= (1 << PB0);   // set pin as output
-	DDRD |= (1 << PD5);   // set pin as output
-}
-
-#define SEND_QUEUE_SIZE 16
-#define SEND_QUEUE_MASK (SEND_QUEUE_SIZE - 1)
-static volatile uint8_t send_queue[SEND_QUEUE_SIZE];
-static volatile uint8_t send_head = 0;
-static volatile uint8_t send_tail = 0;
-static volatile bool may_send_next_byte = true;
-
-void send(uint8_t send_byte) {
-	uint8_t next = (send_head + 1) & SEND_QUEUE_MASK;
-	if (next != send_tail) {
-		send_queue[send_head] = send_byte;
-		send_head = next;
-	}
-}
+#include "leds_on_off.h"
+#include "send_queue.h"
+#include "recv_queue.h"
 
 static uint8_t modifiers = 0;
 #define KEYS_NUM 6
@@ -41,7 +30,6 @@ typedef enum
 } ps2_state_t;
 
 static ps2_state_t ps2_state = PS2_NORMAL;
-static volatile bool is_ps2_queue_overflow = false;
 static bool is_report_changed = false;
 static bool is_modifiers_went_down_in_batch = false;
 static bool is_modifier_only_report = false;
@@ -57,71 +45,6 @@ typedef struct
 static deferred_key_t deferred_keys[DEFERRED_KEY_MAX];
 static uint8_t        deferred_count = 0;
 
-#define PS2_QUEUE_SIZE 16
-#define PS2_QUEUE_MASK (PS2_QUEUE_SIZE - 1)
-
-static volatile uint8_t ps2_queue[PS2_QUEUE_SIZE];
-static volatile uint8_t ps2_head = 0;
-static volatile uint8_t ps2_tail = 0;
-
-static volatile uint8_t ps2_bitcount = 0;
-static volatile uint8_t ps2_byte = 0;
-
-ISR(INT0_vect)
-{
-	uint8_t bit = (PIND & (1 << 1)) ? 1 : 0;
-
-	if (ps2_bitcount == 0)
-	{
-		ps2_bitcount = 1;
-		ps2_byte = 0;
-		return;
-	}
-
-	if (ps2_bitcount >= 1 && ps2_bitcount <= 8)
-	{
-		ps2_byte >>= 1;
-		if (bit)
-			ps2_byte |= 0x80;
-		ps2_bitcount++;
-		return;
-	}
-
-	if (ps2_bitcount == 9)
-	{
-		ps2_bitcount++;
-		return;
-	}
-
-	if (ps2_bitcount == 10)
-	{
-		ps2_bitcount = 0;
-		uint8_t next = (ps2_head + 1) & PS2_QUEUE_MASK;
-		if (next != ps2_tail)
-		{
-			ps2_queue[ps2_head] = ps2_byte;
-			ps2_head = next;
-		} else {
-			is_ps2_queue_overflow = true;
-		}
-	}
-}
-
-static bool ps2_dequeue(uint8_t *byte)
-{
-	bool has_got = false;
-
-	cli();
-	if (ps2_tail != ps2_head)
-	{
-		*byte = ps2_queue[ps2_tail];
-		ps2_tail = (ps2_tail + 1) & PS2_QUEUE_MASK;
-		has_got = true;
-	}
-	sei();
-
-	return has_got;
-}
 
 /** Buffer to hold the previously generated Keyboard HID report, for comparison purposes inside the HID class driver. */
 static uint8_t PrevKeyboardHIDReportBuffer[sizeof(USB_KeyboardReport_Data_t)];
@@ -371,29 +294,24 @@ static void process_ps2_queue(void)
 {
 	uint8_t byte = 0;
 
-	if (is_ps2_queue_overflow)
+	if (is_ps2_queue_overflow())
 	{
 		cli();
-		is_ps2_queue_overflow = false;
+		reset_ps2_queue_overflow();
 		sei();
 		ps2_state = PS2_NORMAL;
 		deferred_count = 0;
 		is_modifiers_went_down_in_batch = false;
 	}
 
-	while (ps2_dequeue(&byte)) {
+	while (recv_dequeue(&byte)) {
 		if (byte == 0xFA)
-			may_send_next_byte = true;
+			allow_send_next_byte();
 		else
 			process_ps2_byte(byte);
 	}
 
-	if (may_send_next_byte && send_tail != send_head) {
-		uint8_t byte = send_queue[send_tail];
-		send_tail = (send_tail + 1) & SEND_QUEUE_MASK;
-		may_send_next_byte = false;
-		ps2_send(byte);
-	}
+	process_send_queue();
 }
 
 static void flush_deferred_keys(void) {
@@ -513,9 +431,8 @@ void CALLBACK_HID_Device_ProcessHIDReport(USB_ClassInfo_HID_Device_t* const HIDI
 	if (*LEDReport & HID_KEYBOARD_LED_CAPSLOCK)
 		LEDMask |= 4;
 
-	send(0xED);
-	send(LEDMask);
-	// send(0x07); // all leds on
+	push_to_send_queue(0xED);
+	push_to_send_queue(LEDMask);
 }
 
 /** Configures the board hardware and chip peripherals for the demo's functionality. */

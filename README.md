@@ -1,4 +1,4 @@
-# AT Keyboard as HID USB Keyboard
+# PS/2 AT Keyboard as HID USB Keyboard
 
 This is a code for Arduino Pro Micro board
 to connect an old pure serial AT keyboard
@@ -23,12 +23,13 @@ Build:
 git clone https://github.com/abcminiuser/lufa.git 
 make clean
 make
-# double link (2 times, fast): RST + GND on the board
+# double tap (2 times, fast): RST + GND on the board
 # to enter the bootloader mode for 8 seconds
+# then immediately run:
 make flash
 ```
 
 ### TODO:
-- leds on keyboard
+- LEDs on keyboard
 - print screen
 - pause/break
