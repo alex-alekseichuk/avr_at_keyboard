@@ -1,3 +1,5 @@
+#include <stdbool.h>
+
 #include <avr/io.h>
 #include <avr/wdt.h>
 #include <avr/interrupt.h>
@@ -12,6 +14,13 @@
 #define DAT_PORT PORTD
 #define DAT_DDR  DDRD
 #define DAT_PIN  PD1
+
+/*
+ * Max number of loop iterations while waiting for a clock edge before giving
+ * up. A PS/2 bit takes at most ~100 us, so ~50 ms of waiting is safely above
+ * any legitimate bit time while still bounding a hang.
+ */
+#define CLK_WAIT_MAX 100000
 
 static inline void clk_low(void)
 {
@@ -40,19 +49,36 @@ static inline uint8_t clk_read(void)
     return PIND & (1 << CLK_PIN);
 }
 
-static void wait_clk_low(void)
+static bool wait_clk_low(void)
 {
-    while (clk_read());
+    for (uint16_t i = 0; i < CLK_WAIT_MAX; i++)
+        if (!clk_read())
+            return true;
+    return false;
 }
 
-static void wait_clk_high(void)
+static bool wait_clk_high(void)
 {
-    while (!clk_read());
+    for (uint16_t i = 0; i < CLK_WAIT_MAX; i++)
+        if (clk_read())
+            return true;
+    return false;
+}
+
+/* Give up on a send: release both lines and re-arm the receiver. */
+static void send_abort(void)
+{
+    dat_release();
+    clk_release();
+    EIFR |= (1 << INTF0);
+    EIMSK |= (1 << INT0);
+    sei();
 }
 
 void ps2_send(uint8_t data)
 {
-    uint8_t parity = 1;
+    /* Even parity: parity bit is 1 iff the data has an odd number of 1 bits. */
+    uint8_t parity = 0;
 
     cli();
 
@@ -71,26 +97,28 @@ void ps2_send(uint8_t data)
     clk_release();
 
     // keyboard starts clocking
-    wait_clk_low();
-    wait_clk_high();
+    if (!wait_clk_low() || !wait_clk_high()) {
+        send_abort();
+        return;
+    }
 
     // -------------------------
-    // send 8 bits
+    // send 8 bits, MSB first
     // -------------------------
 
-    for (uint8_t i = 0; i < 8; i++) {
+    for (int i = 7; i >= 0; i--) {
 
-        if (data & 1) {
+        if (data & (1 << i)) {
             dat_release();
             parity ^= 1;
         } else {
             dat_low();
         }
 
-        wait_clk_low();
-        wait_clk_high();
-
-        data >>= 1;
+        if (!wait_clk_low() || !wait_clk_high()) {
+            send_abort();
+            return;
+        }
     }
 
     // -------------------------
@@ -102,8 +130,10 @@ void ps2_send(uint8_t data)
     else
         dat_low();
 
-    wait_clk_low();
-    wait_clk_high();
+    if (!wait_clk_low() || !wait_clk_high()) {
+        send_abort();
+        return;
+    }
 
     // -------------------------
     // stop bit
@@ -111,16 +141,20 @@ void ps2_send(uint8_t data)
 
     dat_release();
 
-    wait_clk_low();
-    wait_clk_high();
+    if (!wait_clk_low() || !wait_clk_high()) {
+        send_abort();
+        return;
+    }
 
     // -------------------------
     // ACK bit
     // keyboard pulls DATA low
     // -------------------------
 
-    wait_clk_low();
-    wait_clk_high();
+    if (!wait_clk_low() || !wait_clk_high()) {
+        send_abort();
+        return;
+    }
 
     // re-enable receiver
     EIFR |= (1 << INTF0);

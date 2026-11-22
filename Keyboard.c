@@ -68,22 +68,28 @@ USB_ClassInfo_HID_Device_t Keyboard_HID_Interface = {
 		},
 };
 
-static void add_key(uint8_t key) {
+/** Adds a key to the report state. Returns true if the state changed. */
+static bool add_key(uint8_t key) {
 	uint8_t i;
 	for (i = 0; i < KEYS_NUM; i++)
 		if (keys[i] == key)
-			return;
+			return false;
 	for (i = 0; i < KEYS_NUM; i++)
 		if (keys[i] == 0) {
 			keys[i] = key;
-			return;
+			return true;
 		}
+	return false;
 }
 
-static void remove_key(uint8_t key) {
-	for (uint8_t i = 0; i < 6; i++)
-		if (keys[i] == key)
+/** Removes a key from the report state. Returns true if the state changed. */
+static bool remove_key(uint8_t key) {
+	for (uint8_t i = 0; i < KEYS_NUM; i++)
+		if (keys[i] == key) {
 			keys[i] = 0;
+			return true;
+		}
+	return false;
 }
 
 static void handle_modifier(uint8_t code, uint8_t pressed, bool extended) {
@@ -273,17 +279,31 @@ static void process_ps2_byte(uint8_t byte) {
 	uint8_t key = ps2_to_hid(byte, is_extended);
 
 	if (key) {
-		if (is_modifiers_went_down_in_batch && is_pressed && deferred_count < DEFERRED_KEY_MAX) {
-			deferred_keys[deferred_count].hid = key;
-			deferred_keys[deferred_count].pressed = true;
-			deferred_count++;
+		if (is_pressed) {
+			if (is_modifiers_went_down_in_batch && deferred_count < DEFERRED_KEY_MAX) {
+				// Defer the key so a modifiers-only report is sent first
+				// (fixes "fake shift" on fast key presses).
+				deferred_keys[deferred_count].hid = key;
+				deferred_keys[deferred_count].pressed = true;
+				deferred_count++;
+			} else if (add_key(key)) {
+				is_report_changed = true;
+			}
 		} else {
-			if (is_pressed)
-				add_key(key);
-			else
-				remove_key(key);
+			// Cancel any press of this key that is still waiting to be
+			// flushed, otherwise it would end up "stuck" in the report.
+			for (uint8_t i = 0; i < deferred_count; ) {
+				if (deferred_keys[i].hid == key && deferred_keys[i].pressed) {
+					for (uint8_t j = i; j + 1 < deferred_count; j++)
+						deferred_keys[j] = deferred_keys[j + 1];
+					deferred_count--;
+				} else {
+					i++;
+				}
+			}
 
-			is_report_changed = true;
+			if (remove_key(key))
+				is_report_changed = true;
 		}
 	}
 
@@ -316,12 +336,13 @@ static void process_ps2_queue(void)
 
 static void flush_deferred_keys(void) {
 	for (uint8_t i = 0; i < deferred_count; i++) {
-		if (deferred_keys[i].pressed)
-			add_key(deferred_keys[i].hid);
-		else
-			remove_key(deferred_keys[i].hid);
-
-		is_report_changed = true;
+		if (deferred_keys[i].pressed) {
+			if (add_key(deferred_keys[i].hid))
+				is_report_changed = true;
+		} else {
+			if (remove_key(deferred_keys[i].hid))
+				is_report_changed = true;
+		}
 	}
 
 	deferred_count = 0;
@@ -424,11 +445,12 @@ void CALLBACK_HID_Device_ProcessHIDReport(USB_ClassInfo_HID_Device_t* const HIDI
 	uint8_t  LEDMask   = 0;
 	uint8_t* LEDReport = (uint8_t*)ReportData;
 
-	if (*LEDReport & HID_KEYBOARD_LED_SCROLLLOCK)
-		LEDMask |= 1;
+	// PS/2 LED report (0xED): bit0 = NumLock, bit1 = CapsLock, bit2 = ScrollLock
 	if (*LEDReport & HID_KEYBOARD_LED_NUMLOCK)
-		LEDMask |= 2;
+		LEDMask |= 1;
 	if (*LEDReport & HID_KEYBOARD_LED_CAPSLOCK)
+		LEDMask |= 2;
+	if (*LEDReport & HID_KEYBOARD_LED_SCROLLLOCK)
 		LEDMask |= 4;
 
 	push_to_send_queue(0xED);

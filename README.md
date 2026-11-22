@@ -15,7 +15,7 @@ Connect devices:
 | GND           | GND               | GND        |
 | VCC           | VCC               | VCC        |
 | CLOCK         | D3                | PD0 (INT0) |
-| DATA          | D2                | PD1        |
+| DATA          | D4                | PD1        |
 
 Build:
 
